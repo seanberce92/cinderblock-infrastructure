@@ -1,0 +1,7 @@
+{
+  "name": "cinderblock-provisioner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Step Functions task handler: domain registration, ACM, an npm-built Astro+Tailwind site rebuild from its preview bucket's stored source, CloudFront, bucket lockdown. Uses the runtime-bundled AWS SDK v3 plus the runtime's bundled npm binary."
+}

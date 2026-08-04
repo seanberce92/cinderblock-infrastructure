@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and adjust as needed. All values have sane defaults.
+aws_region       = "us-east-1"
+frontend_url     = "http://localhost:5173"
+bedrock_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+# Google Cloud API key from a project with Maps Grounding Lite + Places API
+# (New) enabled and billing on — used by the site-builder Lambda to resolve
+# a pasted Google Business Profile/Maps URL into phone/address/hours/social
+# data. Leave blank to skip GBP grounding (the model just omits those
+# sections). NOTE: unlike the other values here, this is a real secret —
+# a committed tfvars file with this filled in would leak it; for a real prod
+# environment, source it from Secrets Manager instead.
+google_maps_api_key = "AIza..."
+
+# Restricted Stripe API key (Dashboard -> API keys -> Create restricted key,
+# Checkout Sessions: Read only) used by the reconciler Lambda to detect sites
+# stuck past checkout because the /webhooks/stripe endpoint never fired.
+# Do NOT reuse the backend's full STRIPE_SECRET_KEY here.
+stripe_secret_key_readonly = "rk_..."
+
+# Email that receives the "stuck checkout" SNS alert from the reconciler.
+alert_email = "you@example.com"

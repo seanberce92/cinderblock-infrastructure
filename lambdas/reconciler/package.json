@@ -1,0 +1,7 @@
+{
+  "name": "cinderblock-reconciler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "EventBridge (15 min) reconciliation sweep: cross-checks Stripe completed checkout sessions against site status to catch a broken webhook early. Uses the runtime-bundled AWS SDK v3 and native fetch — no node_modules."
+}

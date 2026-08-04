@@ -1,0 +1,18 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfplan
+tfplan
+qa/terraform.tfvars
+
+# Lambda build artifacts
+lambdas/**/lambda.zip
+
+# Test-only devDependencies (see lambdas/site-builder/package.json) — never
+# bundled into lambda.zip, but shouldn't be committed either.
+lambdas/**/node_modules
+lambdas/**/package-lock.json
+
+.DS_Store

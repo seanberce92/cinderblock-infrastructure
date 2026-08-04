@@ -1,0 +1,7 @@
+{
+  "name": "cinderblock-cleanup",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hourly EventBridge cleanup of abandoned preview buckets. Uses the runtime-bundled AWS SDK v3."
+}

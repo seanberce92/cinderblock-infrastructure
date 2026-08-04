@@ -1,0 +1,15 @@
+{
+  "name": "cinderblock-site-builder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bedrock designs an Astro + Tailwind site (guardrail-protected against prompt injection), built with the runtime's bundled npm and uploaded (source + dist/) to the preview S3 bucket. Uses the AWS SDK v3 bundled in the Lambda Node.js runtime.",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "devDependenciesComment": "Test-only — never bundled into lambda.zip (build-lambda.sh zips an explicit file list, not node_modules). Lets `node --test` import bedrock.mjs/reviews.mjs without hitting the AWS SDK the Lambda runtime provides at deploy time.",
+  "devDependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1094.0",
+    "@aws-sdk/client-s3": "^3.1094.0"
+  }
+}
