@@ -39,6 +39,21 @@ output "sandbox_provisioning_state_machine_arn" {
   value       = module.workers.sandbox_provisioning_state_machine_arn
 }
 
+output "site_offline_state_machine_arn" {
+  description = "SITE_OFFLINE_STATE_MACHINE_ARN"
+  value       = module.workers.site_offline_state_machine_arn
+}
+
+output "site_reactivate_state_machine_arn" {
+  description = "SITE_REACTIVATE_STATE_MACHINE_ARN"
+  value       = module.workers.site_reactivate_state_machine_arn
+}
+
+output "site_teardown_state_machine_arn" {
+  description = "SITE_TEARDOWN_STATE_MACHINE_ARN"
+  value       = module.workers.site_teardown_state_machine_arn
+}
+
 output "provisioner_function_name" {
   description = "PROVISIONER_FUNCTION_NAME"
   value       = module.workers.provisioner_function_name

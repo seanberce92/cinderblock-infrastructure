@@ -48,6 +48,27 @@ variable "reconciler_schedule_expression" {
   default     = "rate(15 minutes)"
 }
 
+variable "teardown_schedule_expression" {
+  description = "EventBridge schedule for the subscription-teardown sweep Lambda"
+  type        = string
+  # Weekly is plenty against a 90-day grace period, and this only environment
+  # today (qa) has negligible real subscriber volume — no need for daily
+  # compute/DynamoDB Scan cost here. Pinned to a fixed UTC cron time (9:00
+  # UTC Sunday = ~1-2am Pacific, depending on daylight saving) rather than
+  # rate(7 days), which just repeats every 168h from whenever it was enabled
+  # and drifts unpredictably relative to wall-clock time.
+  #
+  # TODO(prod): override to nightly — cron(0 9 * * ? *) — once a prod
+  # environment exists and this actually gates real customers' data.
+  default = "cron(0 9 ? * SUN *)"
+}
+
+variable "grace_period_days" {
+  description = "Days a site stays offline (subscription ended) before it's eligible for permanent teardown"
+  type        = number
+  default     = 90
+}
+
 # A Stripe API key restricted to read-only access on Checkout Sessions,
 # separate from the backend's full secret key — mint via Stripe Dashboard ->
 # API keys -> Create restricted key. Same plain-tfvars convention as
@@ -82,4 +103,9 @@ variable "lambda_provisioner_zip_path" {
 variable "lambda_reconciler_zip_path" {
   type    = string
   default = "../lambdas/reconciler/lambda.zip"
+}
+
+variable "lambda_subscription_teardown_zip_path" {
+  type    = string
+  default = "../lambdas/subscription-teardown/lambda.zip"
 }

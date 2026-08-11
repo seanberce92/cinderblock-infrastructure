@@ -33,4 +33,5 @@ variable "stripe_secret_key_readonly" {
 variable "alert_email" {
   description = "Email address subscribed to the reconciler's stuck-checkout SNS alerts"
   type        = string
+  default     = "seanberce@gmail.com"
 }

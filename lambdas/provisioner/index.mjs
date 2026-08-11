@@ -23,6 +23,23 @@
  *   markLive         -> status = live
  *   markFailed       -> status = failed
  *
+ *   Offline / reactivate / teardown pipelines (triggered by subscription
+ *   webhooks and the subscription-teardown sweep, not by checkout):
+ *   disableDistribution / enableDistribution -> flip CloudFront Enabled
+ *   checkDistDisabled / checkDistEnabled -> poll -> { distDisabled/distEnabled }
+ *   markReactivateFailed -> status back to offline (customer is paying; a
+ *                       failure here is an infra bug, not a build failure)
+ *   disableSandboxDistribution / checkSandboxDistDisabled /
+ *   deleteSandboxDistribution -> mirror the live-distribution steps, no-op
+ *                       unconditionally when there's no sandbox
+ *   deleteDistribution -> delete the (already-disabled) live distribution
+ *   deleteHostedZone  -> delete all non-NS/SOA records, then the zone itself
+ *   disableDomainAutoRenew -> stop paying to renew a domain nobody uses
+ *   deleteBuckets     -> empty + delete previewBucket and sandboxBucket
+ *   hardDeleteSiteRecord -> DeleteItem the site record (final, irreversible)
+ *   markTeardownFailed -> keeps status=offline, records teardownError,
+ *                       releases the teardownStartedAt lock for a retry
+ *
  *   Sandbox pipeline (separate, shorter state machine — no domain/ACM/Route53,
  *   CloudFront's own default certificate covers the *.cloudfront.net domain):
  *   createSandboxDistribution -> CloudFront OAC + distribution over
@@ -37,6 +54,13 @@
  *                       live CloudFront distribution. Run as a single async
  *                       Lambda invoke, not part of a state machine — no
  *                       eventual-consistency wait involved.
+ *   invalidatePath   -> single-path CloudFront invalidation of the site's
+ *                       live distribution. Used by the asset manager after
+ *                       overwriting a live image/logo object at its existing
+ *                       key — cheaper than publishSandbox's "/*" wildcard
+ *                       since only one object changed, and doesn't touch the
+ *                       sandbox bucket at all. Fire-and-forget, no state
+ *                       machine.
  *
  * Uses the AWS SDK v3 bundled in the Lambda runtime (no node_modules).
  */
@@ -45,11 +69,13 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   UpdateCommand,
+  DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   Route53DomainsClient,
   RegisterDomainCommand,
   GetOperationDetailCommand,
+  DisableDomainAutoRenewCommand,
 } from "@aws-sdk/client-route-53-domains";
 import {
   Route53Client,
@@ -57,6 +83,8 @@ import {
   CreateHostedZoneCommand,
   GetHostedZoneCommand,
   ChangeResourceRecordSetsCommand,
+  ListResourceRecordSetsCommand,
+  DeleteHostedZoneCommand,
 } from "@aws-sdk/client-route-53";
 import {
   ACMClient,
@@ -68,6 +96,9 @@ import {
   CreateOriginAccessControlCommand,
   CreateDistributionCommand,
   GetDistributionCommand,
+  GetDistributionConfigCommand,
+  UpdateDistributionCommand,
+  DeleteDistributionCommand,
   CreateInvalidationCommand,
 } from "@aws-sdk/client-cloudfront";
 import {
@@ -77,6 +108,7 @@ import {
   ListObjectsV2Command,
   CopyObjectCommand,
   DeleteObjectsCommand,
+  DeleteBucketCommand,
 } from "@aws-sdk/client-s3";
 import { randomUUID } from "crypto";
 import path from "node:path";
@@ -471,6 +503,224 @@ const steps = {
     return { siteId: site.siteId, status: "failed" };
   },
 
+  // -- Offline / reactivate ---------------------------------------------
+
+  async disableDistribution(site) {
+    if (!site.distributionId) return { siteId: site.siteId, distDisabled: true };
+    const cfg = await cloudfront.send(
+      new GetDistributionConfigCommand({ Id: site.distributionId })
+    );
+    if (cfg.DistributionConfig?.Enabled === false) return { siteId: site.siteId };
+    await cloudfront.send(
+      new UpdateDistributionCommand({
+        Id: site.distributionId,
+        IfMatch: cfg.ETag,
+        DistributionConfig: { ...cfg.DistributionConfig, Enabled: false },
+      })
+    );
+    return { siteId: site.siteId };
+  },
+
+  async checkDistDisabled(site) {
+    if (!site.distributionId) return { siteId: site.siteId, distDisabled: true };
+    const res = await cloudfront.send(
+      new GetDistributionCommand({ Id: site.distributionId })
+    );
+    return {
+      siteId: site.siteId,
+      distDisabled:
+        res.Distribution?.Status === "Deployed" &&
+        res.Distribution?.DistributionConfig?.Enabled === false,
+    };
+  },
+
+  async enableDistribution(site) {
+    if (!site.distributionId) throw new Error("distributionId missing");
+    const cfg = await cloudfront.send(
+      new GetDistributionConfigCommand({ Id: site.distributionId })
+    );
+    if (cfg.DistributionConfig?.Enabled === true) return { siteId: site.siteId };
+    await cloudfront.send(
+      new UpdateDistributionCommand({
+        Id: site.distributionId,
+        IfMatch: cfg.ETag,
+        DistributionConfig: { ...cfg.DistributionConfig, Enabled: true },
+      })
+    );
+    return { siteId: site.siteId };
+  },
+
+  async checkDistEnabled(site) {
+    const res = await cloudfront.send(
+      new GetDistributionCommand({ Id: site.distributionId })
+    );
+    return {
+      siteId: site.siteId,
+      distEnabled:
+        res.Distribution?.Status === "Deployed" &&
+        res.Distribution?.DistributionConfig?.Enabled === true,
+    };
+  },
+
+  async markReactivateFailed(site, event) {
+    const msg =
+      typeof event?.error === "object"
+        ? JSON.stringify(event.error).slice(0, 500)
+        : String(event?.error || "reactivation failed");
+    await patchSite(
+      site.siteId,
+      ["#s = :offline", "#err = :e", "updatedAt = :now"],
+      { ":offline": "offline", ":e": msg },
+      { "#s": "status", "#err": "error" }
+    );
+    return { siteId: site.siteId, status: "offline" };
+  },
+
+  // -- Teardown ------------------------------------------------------------
+
+  async disableSandboxDistribution(site) {
+    if (!site.sandboxDistributionId)
+      return { siteId: site.siteId, sandboxDistDisabled: true };
+    const cfg = await cloudfront.send(
+      new GetDistributionConfigCommand({ Id: site.sandboxDistributionId })
+    );
+    if (cfg.DistributionConfig?.Enabled === false) return { siteId: site.siteId };
+    await cloudfront.send(
+      new UpdateDistributionCommand({
+        Id: site.sandboxDistributionId,
+        IfMatch: cfg.ETag,
+        DistributionConfig: { ...cfg.DistributionConfig, Enabled: false },
+      })
+    );
+    return { siteId: site.siteId };
+  },
+
+  async checkSandboxDistDisabled(site) {
+    if (!site.sandboxDistributionId)
+      return { siteId: site.siteId, sandboxDistDisabled: true };
+    const res = await cloudfront.send(
+      new GetDistributionCommand({ Id: site.sandboxDistributionId })
+    );
+    return {
+      siteId: site.siteId,
+      sandboxDistDisabled:
+        res.Distribution?.Status === "Deployed" &&
+        res.Distribution?.DistributionConfig?.Enabled === false,
+    };
+  },
+
+  async deleteDistribution(site) {
+    if (!site.distributionId) return { siteId: site.siteId };
+    try {
+      // Fetch a fresh ETag right before deleting — an ETag captured earlier
+      // in the pipeline (e.g. by disableDistribution) goes stale across the
+      // disable/wait cycle and DeleteDistribution rejects a stale IfMatch.
+      const cfg = await cloudfront.send(
+        new GetDistributionConfigCommand({ Id: site.distributionId })
+      );
+      await cloudfront.send(
+        new DeleteDistributionCommand({ Id: site.distributionId, IfMatch: cfg.ETag })
+      );
+    } catch (err) {
+      if (err?.name !== "NoSuchDistribution") throw err;
+    }
+    return { siteId: site.siteId };
+  },
+
+  async deleteSandboxDistribution(site) {
+    if (!site.sandboxDistributionId) return { siteId: site.siteId };
+    try {
+      const cfg = await cloudfront.send(
+        new GetDistributionConfigCommand({ Id: site.sandboxDistributionId })
+      );
+      await cloudfront.send(
+        new DeleteDistributionCommand({
+          Id: site.sandboxDistributionId,
+          IfMatch: cfg.ETag,
+        })
+      );
+    } catch (err) {
+      if (err?.name !== "NoSuchDistribution") throw err;
+    }
+    return { siteId: site.siteId };
+  },
+
+  async deleteHostedZone(site) {
+    if (!site.hostedZoneId) return { siteId: site.siteId };
+    try {
+      const listed = await route53.send(
+        new ListResourceRecordSetsCommand({ HostedZoneId: site.hostedZoneId })
+      );
+      // NS/SOA at the zone apex can't be deleted directly — DeleteHostedZone
+      // removes them automatically and errors if they're deleted first.
+      const changes = (listed.ResourceRecordSets || [])
+        .filter((rrs) => rrs.Type !== "NS" && rrs.Type !== "SOA")
+        .map((rrs) => ({ Action: "DELETE", ResourceRecordSet: rrs }));
+      if (changes.length) {
+        await route53.send(
+          new ChangeResourceRecordSetsCommand({
+            HostedZoneId: site.hostedZoneId,
+            ChangeBatch: { Changes: changes },
+          })
+        );
+      }
+      await route53.send(new DeleteHostedZoneCommand({ Id: site.hostedZoneId }));
+    } catch (err) {
+      if (err?.name !== "NoSuchHostedZone") throw err;
+    }
+    return { siteId: site.siteId };
+  },
+
+  /**
+   * Stops the domain from auto-renewing (and billing the business) once its
+   * site is gone. Doesn't delete the registration — Route 53 Domains has no
+   * delete API — so it simply expires at the end of its current paid term.
+   */
+  async disableDomainAutoRenew(site) {
+    if (site.domainOwned) return { siteId: site.siteId }; // customer-owned domain — nothing we manage
+    try {
+      await domains.send(
+        new DisableDomainAutoRenewCommand({ DomainName: site.domain })
+      );
+    } catch (err) {
+      console.warn(`disableDomainAutoRenew failed for ${site.domain}: ${err}`);
+    }
+    return { siteId: site.siteId };
+  },
+
+  async deleteBuckets(site) {
+    for (const bucket of [site.previewBucket, site.sandboxBucket].filter(Boolean)) {
+      try {
+        await emptyAndDeleteBucket(bucket);
+      } catch (err) {
+        console.warn(`Failed to delete bucket ${bucket}: ${err}`);
+      }
+    }
+    return { siteId: site.siteId };
+  },
+
+  async hardDeleteSiteRecord(site) {
+    await ddb.send(new DeleteCommand({ TableName: SITES_TABLE, Key: { siteId: site.siteId } }));
+    return { siteId: site.siteId, deleted: true };
+  },
+
+  async markTeardownFailed(site, event) {
+    const msg =
+      typeof event?.error === "object"
+        ? JSON.stringify(event.error).slice(0, 500)
+        : String(event?.error || "teardown failed");
+    // Releases the lock (REMOVE teardownStartedAt) so a later sweep can retry.
+    await ddb.send(
+      new UpdateCommand({
+        TableName: SITES_TABLE,
+        Key: { siteId: site.siteId },
+        UpdateExpression: "SET teardownError = :e, updatedAt = :now REMOVE teardownStartedAt",
+        ExpressionAttributeValues: { ":e": msg, ":now": Date.now() },
+      })
+    );
+    return { siteId: site.siteId, status: "offline" };
+  },
+
   // -- Sandbox pipeline -----------------------------------------------------
 
   async createSandboxDistribution(site) {
@@ -698,7 +948,50 @@ const steps = {
     );
     return { siteId: site.siteId, sandboxStatus: "ready", published: true };
   },
+
+  /**
+   * Single-path CloudFront invalidation for the live distribution. Used by
+   * the asset manager to make an overwritten image/logo visible without a
+   * full "/*" invalidation. The caller (SitesController) only invokes this
+   * step when site.status === "live", so distributionId is expected to be
+   * present.
+   */
+  async invalidatePath(site, event) {
+    const p = event?.path;
+    if (!p) throw new Error("path is required");
+    if (!site.distributionId) throw new Error("distributionId missing");
+
+    await cloudfront.send(
+      new CreateInvalidationCommand({
+        DistributionId: site.distributionId,
+        InvalidationBatch: {
+          CallerReference: `invalidate-${site.siteId}-${Date.now()}`,
+          Paths: { Quantity: 1, Items: [p] },
+        },
+      })
+    );
+    return { siteId: site.siteId, invalidated: p };
+  },
 };
+
+/** Mirrors cleanup/index.mjs's helper of the same name — each Lambda dir is a
+ * standalone zip in this repo, no shared-layer convention to dedupe through. */
+async function emptyAndDeleteBucket(bucket) {
+  let ContinuationToken;
+  do {
+    const listed = await s3.send(
+      new ListObjectsV2Command({ Bucket: bucket, ContinuationToken })
+    );
+    const objects = (listed.Contents || []).map((o) => ({ Key: o.Key }));
+    if (objects.length) {
+      await s3.send(
+        new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects } })
+      );
+    }
+    ContinuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (ContinuationToken);
+  await s3.send(new DeleteBucketCommand({ Bucket: bucket }));
+}
 
 async function listAllKeys(bucket) {
   const keys = [];

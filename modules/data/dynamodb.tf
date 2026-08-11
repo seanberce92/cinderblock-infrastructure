@@ -19,8 +19,11 @@ resource "aws_dynamodb_table" "users" {
 
 # ---------------------------------------------------------------------------
 # cinderblock-sites
-# PK: siteId. GSI userId-index for listing a user's sites. Single source of
-# truth for a site through building -> preview -> provisioning -> live.
+# PK: siteId. GSI userId-index for listing a user's sites, GSI
+# subscriptionId-index for resolving a site from a Stripe subscription
+# webhook (customer.subscription.deleted only carries the subscription id,
+# never siteId). Single source of truth for a site through
+# building -> preview -> provisioning -> live -> offline -> (torn down).
 # ---------------------------------------------------------------------------
 resource "aws_dynamodb_table" "sites" {
   name         = "cinderblock-sites-${var.common_labels.env}"
@@ -37,9 +40,20 @@ resource "aws_dynamodb_table" "sites" {
     type = "S"
   }
 
+  attribute {
+    name = "subscriptionId"
+    type = "S"
+  }
+
   global_secondary_index {
     name            = "userId-index"
     hash_key        = "userId"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "subscriptionId-index"
+    hash_key        = "subscriptionId"
     projection_type = "ALL"
   }
 

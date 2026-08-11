@@ -1,0 +1,7 @@
+{
+  "name": "cinderblock-subscription-teardown",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "EventBridge (hourly) sweep: finds sites offline past the grace period, re-verifies against Stripe that there's still no active subscription, then starts the site-teardown Step Functions execution. Uses the runtime-bundled AWS SDK v3 and native fetch — no node_modules."
+}

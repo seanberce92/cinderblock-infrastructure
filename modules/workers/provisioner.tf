@@ -21,17 +21,18 @@ resource "aws_iam_role_policy" "provisioner" {
       },
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+        Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
         Resource = [var.sites_table_arn]
       },
       {
-        # Domain registration + operation polling. These actions do not support
-        # resource-level scoping.
+        # Domain registration + operation polling, plus disabling auto-renew
+        # during teardown. These actions do not support resource-level scoping.
         Effect = "Allow"
         Action = [
           "route53domains:RegisterDomain",
           "route53domains:GetOperationDetail",
-          "route53domains:GetDomainDetail"
+          "route53domains:GetDomainDetail",
+          "route53domains:DisableDomainAutoRenew"
         ]
         Resource = ["*"]
       },
@@ -42,7 +43,9 @@ resource "aws_iam_role_policy" "provisioner" {
           "route53:CreateHostedZone",
           "route53:GetHostedZone",
           "route53:ChangeResourceRecordSets",
-          "route53:GetChange"
+          "route53:GetChange",
+          "route53:ListResourceRecordSets",
+          "route53:DeleteHostedZone"
         ]
         Resource = ["*"]
       },
@@ -55,25 +58,31 @@ resource "aws_iam_role_policy" "provisioner" {
         Resource = ["*"]
       },
       {
+        # CloudFront distribution actions do not support resource-level
+        # scoping. Update/Delete/GetDistributionConfig back the disable,
+        # re-enable, and teardown steps (site_offline/site_reactivate/site_teardown).
         Effect = "Allow"
         Action = [
           "cloudfront:CreateOriginAccessControl",
           "cloudfront:CreateDistribution",
           "cloudfront:GetDistribution",
+          "cloudfront:GetDistributionConfig",
+          "cloudfront:UpdateDistribution",
+          "cloudfront:DeleteDistribution",
           "cloudfront:CreateInvalidation"
         ]
         Resource = ["*"]
       },
       {
         Effect   = "Allow"
-        Action   = ["s3:PutBucketPublicAccessBlock", "s3:PutBucketPolicy"]
+        Action   = ["s3:PutBucketPublicAccessBlock", "s3:PutBucketPolicy", "s3:DeleteBucket"]
         Resource = concat(local.preview_bucket_arns, local.sandbox_bucket_arns)
       },
       {
         # Download the site's stored Astro source (buildSite step) and
         # upload the freshly built dist/ output back. Also covers
         # publishSandbox mirroring a sandbox bucket onto the live preview
-        # bucket, which additionally needs DeleteObject to drop stale keys.
+        # bucket, and the teardown pipeline emptying a bucket before deleting it.
         Effect = "Allow"
         Action = [
           "s3:ListBucket",

@@ -52,6 +52,21 @@ locals {
     ResultPath  = "$.error"
     Next        = "MarkSandboxFailed"
   }]
+  offline_catch_block = [{
+    ErrorEquals = ["States.ALL"]
+    ResultPath  = "$.error"
+    Next        = "SiteOfflineFailed"
+  }]
+  reactivate_catch_block = [{
+    ErrorEquals = ["States.ALL"]
+    ResultPath  = "$.error"
+    Next        = "MarkReactivateFailed"
+  }]
+  teardown_catch_block = [{
+    ErrorEquals = ["States.ALL"]
+    ResultPath  = "$.error"
+    Next        = "MarkTeardownFailed"
+  }]
 }
 
 resource "aws_sfn_state_machine" "provisioning" {
@@ -299,4 +314,306 @@ resource "aws_sfn_state_machine" "sandbox_provisioning" {
       }
     }
   })
+}
+
+# ---------------------------------------------------------------------------
+# Site offline pipeline — triggered by the customer.subscription.deleted
+# webhook once the site's DB status has already been flipped to "offline"
+# synchronously. Just disables the CloudFront distribution; nothing else is
+# destroyed. Reuses the same provisioner Lambda + IAM role.
+# ---------------------------------------------------------------------------
+resource "aws_sfn_state_machine" "site_offline" {
+  name     = "cinderblock-site-offline-${local.env}"
+  role_arn = aws_iam_role.provisioning_sfn.arn
+
+  definition = jsonencode({
+    Comment = "Cinderblock site offline (subscription ended)"
+    StartAt = "DisableDomainAutoRenew"
+    States = {
+      DisableDomainAutoRenew = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "disableDomainAutoRenew" }
+        Retry      = local.retry_block
+        Catch      = local.offline_catch_block
+        Next       = "DisableDistribution"
+      }
+      DisableDistribution = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "disableDistribution" }
+        Retry      = local.retry_block
+        Catch      = local.offline_catch_block
+        Next       = "WaitDisable"
+      }
+      WaitDisable = {
+        Type    = "Wait"
+        Seconds = 60
+        Next    = "CheckDistDisabled"
+      }
+      CheckDistDisabled = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "checkDistDisabled" }
+        Retry      = local.retry_block
+        Catch      = local.offline_catch_block
+        Next       = "DistDisabled"
+      }
+      DistDisabled = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.distDisabled"
+          BooleanEquals = true
+          Next          = "SiteOfflineDone"
+        }]
+        Default = "WaitDisable"
+      }
+      SiteOfflineDone = {
+        Type = "Succeed"
+      }
+      SiteOfflineFailed = {
+        Type  = "Fail"
+        Error = "SiteOfflineFailed"
+        Cause = "Distribution may still be publicly accessible; see execution error."
+      }
+    }
+  })
+}
+
+# ---------------------------------------------------------------------------
+# Site reactivate pipeline — triggered when a new checkout.session.completed
+# arrives for a site that was "offline" (i.e. the customer resubscribed
+# during the grace period). Re-enables the existing CloudFront distribution
+# rather than provisioning a new one.
+# ---------------------------------------------------------------------------
+resource "aws_sfn_state_machine" "site_reactivate" {
+  name     = "cinderblock-site-reactivate-${local.env}"
+  role_arn = aws_iam_role.provisioning_sfn.arn
+
+  definition = jsonencode({
+    Comment = "Cinderblock site reactivate (resubscribed during grace period)"
+    StartAt = "EnableDistribution"
+    States = {
+      EnableDistribution = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "enableDistribution" }
+        Retry      = local.retry_block
+        Catch      = local.reactivate_catch_block
+        Next       = "WaitEnable"
+      }
+      WaitEnable = {
+        Type    = "Wait"
+        Seconds = 60
+        Next    = "CheckDistEnabled"
+      }
+      CheckDistEnabled = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "checkDistEnabled" }
+        Retry      = local.retry_block
+        Catch      = local.reactivate_catch_block
+        Next       = "DistEnabled"
+      }
+      DistEnabled = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.distEnabled"
+          BooleanEquals = true
+          Next          = "MarkLive"
+        }]
+        Default = "WaitEnable"
+      }
+      MarkLive = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "markLive" }
+        Retry      = local.retry_block
+        End        = true
+      }
+      MarkReactivateFailed = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "markReactivateFailed", "error.$" = "$.error" }
+        Next       = "ReactivateFailed"
+      }
+      ReactivateFailed = {
+        Type  = "Fail"
+        Error = "ReactivateFailed"
+        Cause = "See the site record's error field."
+      }
+    }
+  })
+}
+
+# ---------------------------------------------------------------------------
+# Site teardown pipeline — permanently destroys a site's hosting resources.
+# Started either by the backend (owner-triggered "delete now") or by the
+# subscription-teardown sweep Lambda (automatic, after the grace period),
+# both coordinated through the site record's teardownStartedAt lock so they
+# can't race each other. Disables both distributions before deleting them
+# (CloudFront requires Enabled=false + fully deployed before DeleteDistribution
+# succeeds), then DNS, then domain auto-renew, then buckets, then the DB item.
+# ---------------------------------------------------------------------------
+resource "aws_sfn_state_machine" "site_teardown" {
+  name     = "cinderblock-site-teardown-${local.env}"
+  role_arn = aws_iam_role.provisioning_sfn.arn
+
+  definition = jsonencode({
+    Comment = "Cinderblock site teardown (permanent deletion)"
+    StartAt = "DisableDistribution"
+    States = {
+      DisableDistribution = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "disableDistribution" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "WaitDisable"
+      }
+      WaitDisable = {
+        Type    = "Wait"
+        Seconds = 60
+        Next    = "CheckDistDisabled"
+      }
+      CheckDistDisabled = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "checkDistDisabled" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "DistDisabledChoice"
+      }
+      DistDisabledChoice = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.distDisabled"
+          BooleanEquals = true
+          Next          = "DisableSandboxDistribution"
+        }]
+        Default = "WaitDisable"
+      }
+      DisableSandboxDistribution = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "disableSandboxDistribution" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "WaitSandboxDisable"
+      }
+      WaitSandboxDisable = {
+        Type    = "Wait"
+        Seconds = 60
+        Next    = "CheckSandboxDistDisabled"
+      }
+      CheckSandboxDistDisabled = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "checkSandboxDistDisabled" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "SandboxDistDisabledChoice"
+      }
+      SandboxDistDisabledChoice = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.sandboxDistDisabled"
+          BooleanEquals = true
+          Next          = "DeleteDistribution"
+        }]
+        Default = "WaitSandboxDisable"
+      }
+      DeleteDistribution = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "deleteDistribution" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "DeleteSandboxDistribution"
+      }
+      DeleteSandboxDistribution = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "deleteSandboxDistribution" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "DeleteHostedZone"
+      }
+      DeleteHostedZone = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "deleteHostedZone" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "DisableDomainAutoRenew"
+      }
+      DisableDomainAutoRenew = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "disableDomainAutoRenew" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "DeleteBuckets"
+      }
+      DeleteBuckets = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "deleteBuckets" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        Next       = "HardDeleteSiteRecord"
+      }
+      HardDeleteSiteRecord = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "hardDeleteSiteRecord" }
+        Retry      = local.retry_block
+        Catch      = local.teardown_catch_block
+        End        = true
+      }
+      MarkTeardownFailed = {
+        Type       = "Task"
+        Resource   = local.provisioner_arn
+        Parameters = { "siteId.$" = "$.siteId", step = "markTeardownFailed", "error.$" = "$.error" }
+        Next       = "TeardownFailed"
+      }
+      TeardownFailed = {
+        Type  = "Fail"
+        Error = "TeardownFailed"
+        Cause = "See the site record's teardownError field."
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_metric_alarm" "site_offline_failed" {
+  alarm_name          = "cinderblock-site-offline-failed-${local.env}"
+  alarm_description   = "A site-offline Step Functions execution failed — the site's DB status may say offline while CloudFront is still serving it publicly."
+  namespace           = "AWS/States"
+  metric_name         = "ExecutionsFailed"
+  dimensions          = { StateMachineArn = aws_sfn_state_machine.site_offline.arn }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.reconciler_alerts.arn]
+  ok_actions          = [aws_sns_topic.reconciler_alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "site_teardown_failed" {
+  alarm_name          = "cinderblock-site-teardown-failed-${local.env}"
+  alarm_description   = "A site-teardown Step Functions execution failed — the site is stuck mid-deletion; see teardownError on the site record."
+  namespace           = "AWS/States"
+  metric_name         = "ExecutionsFailed"
+  dimensions          = { StateMachineArn = aws_sfn_state_machine.site_teardown.arn }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.reconciler_alerts.arn]
+  ok_actions          = [aws_sns_topic.reconciler_alerts.arn]
 }

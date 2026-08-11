@@ -25,5 +25,6 @@ package site-builder index.mjs bedrock.mjs fetchContext.mjs googleBusinessData.m
 package cleanup     index.mjs package.json
 package provisioner index.mjs buildAstro.mjs package.json
 package reconciler  index.mjs package.json
+package subscription-teardown index.mjs package.json
 
 echo "Done."
