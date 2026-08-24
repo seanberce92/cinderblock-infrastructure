@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Package each Cinderblock worker Lambda into lambda.zip. The functions use the
-# AWS SDK v3 that ships in the Node.js Lambda runtime, so there are no Lambda
-# *code* dependencies to install — we just zip the source (.mjs + package.json
-# + templates). site-builder and provisioner additionally shell out to the
-# runtime's bundled npm at invocation time to build the generated Astro
-# project (its own package.json is installed fresh into /tmp on each run, not
-# bundled into the zip).
+# Package each Cinderblock worker Lambda into lambda.zip. Most functions use
+# the AWS SDK v3 that ships in the Node.js Lambda runtime, so there are no
+# Lambda *code* dependencies to install — we just zip the source (.mjs +
+# package.json + templates). site-builder and provisioner additionally shell
+# out to the runtime's bundled npm at invocation time to build the generated
+# Astro project (its own package.json is installed fresh into /tmp on each
+# run, not bundled into the zip).
+#
+# cognito-email-sender is the one exception: it needs @aws-crypto/client-node
+# (the AWS Encryption SDK), which is NOT bundled in the Lambda runtime — its
+# package() call runs `npm install` first and ships node_modules in the zip.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAMBDAS_DIR="$ROOT_DIR/lambdas"
@@ -21,10 +25,20 @@ package() {
   echo "  -> lambdas/$name/lambda.zip"
 }
 
+package_with_deps() {
+  local name="$1"; shift
+  local dir="$LAMBDAS_DIR/$name"
+  echo "Installing deps for $name..."
+  ( cd "$dir" && npm install --omit=dev --no-audit --no-fund > /dev/null )
+  package "$name" "$@" node_modules
+}
+
 package site-builder index.mjs bedrock.mjs fetchContext.mjs googleBusinessData.mjs reviews.mjs validateLinks.mjs buildAstro.mjs prompts templates package.json
 package cleanup     index.mjs package.json
 package provisioner index.mjs buildAstro.mjs package.json
 package reconciler  index.mjs package.json
 package subscription-teardown index.mjs package.json
+package domain-renewal index.mjs package.json
+package_with_deps cognito-email-sender index.mjs template.html reset-password-template.html package.json
 
 echo "Done."

@@ -59,8 +59,10 @@ resource "aws_iam_role_policy" "provisioner" {
       },
       {
         # CloudFront distribution actions do not support resource-level
-        # scoping. Update/Delete/GetDistributionConfig back the disable,
-        # re-enable, and teardown steps (site_offline/site_reactivate/site_teardown).
+        # scoping. Update/Delete/GetDistributionConfig back the placeholder
+        # origin swap, live origin swap, and teardown steps
+        # (site_offline/site_reactivate/site_teardown), plus the real
+        # disableDistribution/checkDistDisabled steps site_teardown still uses.
         Effect = "Allow"
         Action = [
           "cloudfront:CreateOriginAccessControl",
@@ -114,8 +116,9 @@ resource "aws_lambda_function" "provisioner" {
 
   environment {
     variables = {
-      ENV         = local.env
-      SITES_TABLE = var.sites_table_name
+      ENV                       = local.env
+      SITES_TABLE               = var.sites_table_name
+      PLACEHOLDER_ORIGIN_DOMAIN = var.placeholder_origin_domain
     }
   }
 }

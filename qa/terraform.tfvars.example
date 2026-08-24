@@ -18,5 +18,26 @@ google_maps_api_key = "AIza..."
 # Do NOT reuse the backend's full STRIPE_SECRET_KEY here.
 stripe_secret_key_readonly = "rk_..."
 
-# Email that receives the "stuck checkout" SNS alert from the reconciler.
+# Email that receives the "stuck checkout" SNS alert from the reconciler, and
+# (separately) SES bounce/complaint alerts.
 alert_email = "you@example.com"
+
+# Address DMARC aggregate reports for mail.cinderblock.site are sent to.
+dmarc_report_email = "you@example.com"
+
+# Base URL of the deployed backend API (SST ApiGatewayV2 `apiUrl` output).
+# Leave blank until after the first `sst deploy` from cinderblock-backend,
+# then re-apply with it set so the domain-renewal Lambda can reach
+# /internal/domain-renewal-heads-up and /internal/domain-renewal-charge.
+backend_internal_url = ""
+
+# Subdomain segment of backend_internal_url above -- the API Gateway v2 HTTP
+# API id, used to attach the api-qa.cinderblock.site custom domain to the
+# existing SST-managed API without touching sst.config.ts. Same
+# leave-blank-until-first-deploy rule as backend_internal_url.
+api_gateway_id = ""
+
+# Shared secret the domain-renewal Lambda sends as X-Internal-Secret. Must
+# match the value set on the backend via:
+#   npx sst secret set InternalApiSecret <value> --stage qa
+internal_api_secret = ""

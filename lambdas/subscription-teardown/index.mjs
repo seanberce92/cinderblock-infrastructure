@@ -14,8 +14,15 @@
  * executions on the same site_teardown state machine, and the conditional
  * claim below prevents either path from double-starting an execution.
  *
+ * Also runs an earlier warning pass, WARNING_DAYS_BEFORE_TEARDOWN days before
+ * the grace period actually ends, that emails the owner via the backend's
+ * internal endpoint — same "Lambda decides when, backend decides what"
+ * pattern as the domain-renewal Lambda. Sites already claimed for teardown
+ * (teardownStartedAt set) are skipped since a warning would be pointless.
+ *
  * Uses the AWS SDK v3 bundled in the Lambda runtime (no node_modules) plus
- * the Node 22 runtime's native fetch for the read-only Stripe API call.
+ * the Node 22 runtime's native fetch for the read-only Stripe API call and
+ * the backend call.
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -33,10 +40,92 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const SITE_TEARDOWN_STATE_MACHINE_ARN = process.env.SITE_TEARDOWN_STATE_MACHINE_ARN;
 const GRACE_PERIOD_DAYS = Number(process.env.GRACE_PERIOD_DAYS ?? "90");
 const GRACE_PERIOD_MS = GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+const BACKEND_INTERNAL_URL = process.env.BACKEND_INTERNAL_URL;
+const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
+const WARNING_DAYS_BEFORE_TEARDOWN = Number(process.env.WARNING_DAYS_BEFORE_TEARDOWN ?? "7");
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 const sfn = new SFNClient({ region: REGION });
 const cloudwatch = new CloudWatchClient({ region: REGION });
+
+async function callInternal(path, body) {
+  const res = await fetch(`${BACKEND_INTERNAL_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Internal-Secret": INTERNAL_API_SECRET ?? "",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`${path} failed: ${res.status} ${await res.text()}`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+/** Sends the grace-period teardown warning to offline sites approaching (but
+ * not yet past) the teardown cutoff, that haven't been warned or claimed for
+ * teardown already. Returns the count notified. */
+async function sendTeardownWarnings() {
+  if (!BACKEND_INTERNAL_URL) {
+    console.error("BACKEND_INTERNAL_URL unset — skipping teardown warnings");
+    return 0;
+  }
+
+  const now = Date.now();
+  // Sites older than warningCutoff are within WARNING_DAYS_BEFORE_TEARDOWN of
+  // deletion; sites older than teardownCutoff have already crossed the full
+  // grace period and are handled by the teardown-cutoff scan below instead —
+  // excluding them here stops a "days remaining" email from going out the
+  // same run a site is actually torn down.
+  const warningCutoff = now - (GRACE_PERIOD_MS - WARNING_DAYS_BEFORE_TEARDOWN * DAY_MS);
+  const teardownCutoff = now - GRACE_PERIOD_MS;
+  let ExclusiveStartKey;
+  let notified = 0;
+
+  do {
+    const res = await ddb.send(
+      new ScanCommand({
+        TableName: SITES_TABLE,
+        ExclusiveStartKey,
+        FilterExpression:
+          "#s = :offline AND offlineAt < :warningCutoff AND offlineAt >= :teardownCutoff AND attribute_not_exists(teardownWarningSent) AND attribute_not_exists(teardownStartedAt)",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: {
+          ":offline": "offline",
+          ":warningCutoff": warningCutoff,
+          ":teardownCutoff": teardownCutoff,
+        },
+      })
+    );
+
+    for (const site of res.Items || []) {
+      const daysRemaining = Math.max(
+        0,
+        Math.ceil((site.offlineAt + GRACE_PERIOD_MS - now) / DAY_MS)
+      );
+      try {
+        await callInternal("/internal/site-teardown-warning", { siteId: site.siteId, daysRemaining });
+        await ddb.send(
+          new UpdateCommand({
+            TableName: SITES_TABLE,
+            Key: { siteId: site.siteId },
+            UpdateExpression: "SET teardownWarningSent = :true, updatedAt = :now",
+            ExpressionAttributeValues: { ":true": true, ":now": now },
+          })
+        );
+        notified++;
+      } catch (err) {
+        console.error(`teardown-warning notify failed for site ${site.siteId}: ${err}`);
+      }
+    }
+
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+
+  return notified;
+}
 
 /** True if Stripe currently shows an active subscription for this customer. */
 async function hasActiveSubscription(stripeCustomerId) {
@@ -103,9 +192,11 @@ async function releaseTeardownLock(siteId) {
 }
 
 export const handler = async () => {
+  const warned = await sendTeardownWarnings();
+
   if (!SITE_TEARDOWN_STATE_MACHINE_ARN) {
     console.error("SITE_TEARDOWN_STATE_MACHINE_ARN unset — cannot start teardown executions");
-    return { scanned: 0, tornDown: 0, unexpectedActive: 0, skippedConfig: true };
+    return { scanned: 0, tornDown: 0, unexpectedActive: 0, warned, skippedConfig: true };
   }
 
   const cutoff = Date.now() - GRACE_PERIOD_MS;
@@ -172,7 +263,7 @@ export const handler = async () => {
   await putMetric("UnexpectedActiveSubscription", unexpectedActive);
 
   console.log(
-    `Subscription-teardown sweep complete. scanned=${scanned} tornDown=${tornDown} unexpectedActive=${unexpectedActive}`
+    `Subscription-teardown sweep complete. scanned=${scanned} tornDown=${tornDown} unexpectedActive=${unexpectedActive} warned=${warned}`
   );
-  return { scanned, tornDown, unexpectedActive };
+  return { scanned, tornDown, unexpectedActive, warned };
 };

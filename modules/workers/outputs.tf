@@ -22,6 +22,10 @@ output "subscription_teardown_function_name" {
   value = aws_lambda_function.subscription_teardown.function_name
 }
 
+output "domain_renewal_function_name" {
+  value = aws_lambda_function.domain_renewal.function_name
+}
+
 output "provisioning_state_machine_arn" {
   value = aws_sfn_state_machine.provisioning.arn
 }

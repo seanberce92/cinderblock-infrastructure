@@ -10,8 +10,11 @@ qa/terraform.tfvars
 # Lambda build artifacts
 lambdas/**/lambda.zip
 
-# Test-only devDependencies (see lambdas/site-builder/package.json) — never
-# bundled into lambda.zip, but shouldn't be committed either.
+# Installed deps — never committed. Usually test-only devDependencies (see
+# lambdas/site-builder/package.json) that never end up in lambda.zip, but for
+# lambdas/cognito-email-sender this IS bundled into the zip by build-lambda.sh
+# (real runtime dependency, @aws-crypto/client-node) — still shouldn't be
+# committed either way; build-lambda.sh reinstalls it fresh on every build.
 lambdas/**/node_modules
 lambdas/**/package-lock.json
 

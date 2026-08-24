@@ -31,3 +31,46 @@ resource "aws_s3_bucket_cors_configuration" "uploads" {
     max_age_seconds = 3000
   }
 }
+
+# ---------------------------------------------------------------------------
+# cinderblock-email-assets — public-read bucket for static assets referenced
+# by branded HTML emails (the white logo PNG, etc). Email clients fetch
+# images over plain HTTPS with no auth, so this is a plain public bucket URL
+# rather than a signed/private one — no CloudFront/ACM/custom domain for this
+# pass (see plan's explicit non-goals). Objects are uploaded manually (there's
+# no build pipeline for a handful of static images).
+# ---------------------------------------------------------------------------
+resource "aws_s3_bucket" "email_assets" {
+  bucket = "cinderblock-email-assets-${var.common_labels.env}"
+
+  tags = {
+    Name = "cinderblock-email-assets-${var.common_labels.env}"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "email_assets" {
+  bucket = aws_s3_bucket.email_assets.id
+
+  block_public_acls       = true
+  block_public_policy     = false
+  ignore_public_acls      = true
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_policy" "email_assets_public_read" {
+  bucket = aws_s3_bucket.email_assets.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "PublicReadOnly"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.email_assets.arn}/*"
+      }
+    ]
+  })
+
+  depends_on = [aws_s3_bucket_public_access_block.email_assets]
+}

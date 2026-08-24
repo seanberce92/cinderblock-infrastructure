@@ -44,8 +44,11 @@ resource "aws_lambda_function" "cleanup" {
 
   environment {
     variables = {
-      ENV         = local.env
-      SITES_TABLE = var.sites_table_name
+      ENV                      = local.env
+      SITES_TABLE              = var.sites_table_name
+      BACKEND_INTERNAL_URL     = var.backend_internal_url
+      INTERNAL_API_SECRET      = var.internal_api_secret
+      PREVIEW_HEADS_UP_MINUTES = var.preview_heads_up_minutes
     }
   }
 }

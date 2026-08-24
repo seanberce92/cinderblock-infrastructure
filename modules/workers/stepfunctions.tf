@@ -319,8 +319,9 @@ resource "aws_sfn_state_machine" "sandbox_provisioning" {
 # ---------------------------------------------------------------------------
 # Site offline pipeline — triggered by the customer.subscription.deleted
 # webhook once the site's DB status has already been flipped to "offline"
-# synchronously. Just disables the CloudFront distribution; nothing else is
-# destroyed. Reuses the same provisioner Lambda + IAM role.
+# synchronously. Swaps the CloudFront distribution's origin to the shared
+# branded placeholder (see the data module's cinderblock-placeholder bucket);
+# nothing is disabled or destroyed. Reuses the same provisioner Lambda + IAM role.
 # ---------------------------------------------------------------------------
 resource "aws_sfn_state_machine" "site_offline" {
   name     = "cinderblock-site-offline-${local.env}"
@@ -341,7 +342,7 @@ resource "aws_sfn_state_machine" "site_offline" {
       DisableDistribution = {
         Type       = "Task"
         Resource   = local.provisioner_arn
-        Parameters = { "siteId.$" = "$.siteId", step = "disableDistribution" }
+        Parameters = { "siteId.$" = "$.siteId", step = "switchToPlaceholderOrigin" }
         Retry      = local.retry_block
         Catch      = local.offline_catch_block
         Next       = "WaitDisable"
@@ -354,7 +355,7 @@ resource "aws_sfn_state_machine" "site_offline" {
       CheckDistDisabled = {
         Type       = "Task"
         Resource   = local.provisioner_arn
-        Parameters = { "siteId.$" = "$.siteId", step = "checkDistDisabled" }
+        Parameters = { "siteId.$" = "$.siteId", step = "checkPlaceholderOriginActive" }
         Retry      = local.retry_block
         Catch      = local.offline_catch_block
         Next       = "DistDisabled"
@@ -383,8 +384,8 @@ resource "aws_sfn_state_machine" "site_offline" {
 # ---------------------------------------------------------------------------
 # Site reactivate pipeline — triggered when a new checkout.session.completed
 # arrives for a site that was "offline" (i.e. the customer resubscribed
-# during the grace period). Re-enables the existing CloudFront distribution
-# rather than provisioning a new one.
+# during the grace period). Swaps the existing CloudFront distribution's
+# origin back to the site's own bucket rather than provisioning a new one.
 # ---------------------------------------------------------------------------
 resource "aws_sfn_state_machine" "site_reactivate" {
   name     = "cinderblock-site-reactivate-${local.env}"
@@ -397,7 +398,7 @@ resource "aws_sfn_state_machine" "site_reactivate" {
       EnableDistribution = {
         Type       = "Task"
         Resource   = local.provisioner_arn
-        Parameters = { "siteId.$" = "$.siteId", step = "enableDistribution" }
+        Parameters = { "siteId.$" = "$.siteId", step = "switchToLiveOrigin" }
         Retry      = local.retry_block
         Catch      = local.reactivate_catch_block
         Next       = "WaitEnable"
@@ -410,7 +411,7 @@ resource "aws_sfn_state_machine" "site_reactivate" {
       CheckDistEnabled = {
         Type       = "Task"
         Resource   = local.provisioner_arn
-        Parameters = { "siteId.$" = "$.siteId", step = "checkDistEnabled" }
+        Parameters = { "siteId.$" = "$.siteId", step = "checkLiveOriginActive" }
         Retry      = local.retry_block
         Catch      = local.reactivate_catch_block
         Next       = "DistEnabled"

@@ -25,8 +25,21 @@
  *
  *   Offline / reactivate / teardown pipelines (triggered by subscription
  *   webhooks and the subscription-teardown sweep, not by checkout):
- *   disableDistribution / enableDistribution -> flip CloudFront Enabled
- *   checkDistDisabled / checkDistEnabled -> poll -> { distDisabled/distEnabled }
+ *   switchToPlaceholderOrigin / switchToLiveOrigin -> swap the distribution's
+ *                       DefaultCacheBehavior between the site's own origin and
+ *                       the shared branded-placeholder origin (both are always
+ *                       present in Origins, added at createDistribution time).
+ *                       switchToPlaceholderOrigin is also called directly (not
+ *                       as a dispatched step) from markFailed, when a
+ *                       provisioning failure happens after DNS/the
+ *                       distribution already exist (checkDist/writeAlias/
+ *                       lockBucket) so a visitor never sees broken/half-locked
+ *                       bucket content.
+ *   checkPlaceholderOriginActive / checkLiveOriginActive -> poll -> { distDisabled/distEnabled }
+ *   disableDistribution / checkDistDisabled -> flip CloudFront Enabled false
+ *                       and poll for it; used only by site_teardown, which
+ *                       must fully disable (not just retarget) a distribution
+ *                       before DeleteDistributionCommand will accept it.
  *   markReactivateFailed -> status back to offline (customer is paying; a
  *                       failure here is an infra bug, not a build failure)
  *   disableSandboxDistribution / checkSandboxDistDisabled /
@@ -75,6 +88,7 @@ import {
   Route53DomainsClient,
   RegisterDomainCommand,
   GetOperationDetailCommand,
+  GetDomainDetailCommand,
   DisableDomainAutoRenewCommand,
 } from "@aws-sdk/client-route-53-domains";
 import {
@@ -124,6 +138,10 @@ const ENV = process.env.ENV ?? "qa";
 const SITES_TABLE = process.env.SITES_TABLE ?? "cinderblock-sites-qa";
 // CloudFront's fixed hosted-zone id for alias records (global constant).
 const CLOUDFRONT_HZ = "Z2FDTNDATAQYW2";
+// Shared branded-placeholder origin, present on every site's distribution
+// alongside its own origin (see createDistribution / switchToPlaceholderOrigin).
+const PLACEHOLDER_ORIGIN_ID = "s3-cinderblock-placeholder";
+const PLACEHOLDER_ORIGIN_DOMAIN = process.env.PLACEHOLDER_ORIGIN_DOMAIN;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 const domains = new Route53DomainsClient({ region: "us-east-1" });
@@ -166,6 +184,74 @@ function contactFrom(rc) {
   };
 }
 
+/**
+ * Persists the domain's initial expiration date (used by the domain-renewal
+ * Lambda to schedule reminder/charge thresholds) right after registration
+ * succeeds. Best-effort — a failure here shouldn't fail the provisioning
+ * pipeline; the domain-renewal Lambda refreshes/backfills this itself on its
+ * next sweep if it's ever missing.
+ */
+async function recordDomainExpiration(site) {
+  try {
+    const res = await domains.send(
+      new GetDomainDetailCommand({ DomainName: site.domain })
+    );
+    if (!res.ExpirationDate) return;
+    await patchSite(
+      site.siteId,
+      ["domainExpiresAt = :exp", "domainAutoRenewEnabled = :ar", "updatedAt = :now"],
+      { ":exp": new Date(res.ExpirationDate).getTime(), ":ar": !!res.AutoRenew }
+    );
+  } catch (err) {
+    console.warn(`GetDomainDetail failed for ${site.domain}: ${err}`);
+  }
+}
+
+function placeholderOriginConfig() {
+  return {
+    Id: PLACEHOLDER_ORIGIN_ID,
+    DomainName: PLACEHOLDER_ORIGIN_DOMAIN,
+    CustomOriginConfig: {
+      HTTPPort: 80,
+      HTTPSPort: 443,
+      OriginProtocolPolicy: "https-only",
+      OriginSslProtocols: { Quantity: 1, Items: ["TLSv1.2"] },
+    },
+  };
+}
+
+/** Swaps DefaultCacheBehavior.TargetOriginId to `targetOriginId`, adding the
+ * placeholder origin to Origins first if an older distribution (created
+ * before this change) doesn't already have it. No-op if already pointed at
+ * `targetOriginId`. Used by both switchToPlaceholderOrigin/switchToLiveOrigin
+ * below and markFailed's direct (non-step) call. */
+async function swapTargetOrigin(site, targetOriginId) {
+  if (!site.distributionId) return;
+  const cfg = await cloudfront.send(
+    new GetDistributionConfigCommand({ Id: site.distributionId })
+  );
+  const config = cfg.DistributionConfig;
+  if (config?.DefaultCacheBehavior?.TargetOriginId === targetOriginId) return;
+
+  const origins = config.Origins?.Items ?? [];
+  const hasPlaceholder = origins.some((o) => o.Id === PLACEHOLDER_ORIGIN_ID);
+  if (!hasPlaceholder) {
+    origins.push(placeholderOriginConfig());
+    config.Origins = { ...config.Origins, Quantity: origins.length, Items: origins };
+  }
+
+  await cloudfront.send(
+    new UpdateDistributionCommand({
+      Id: site.distributionId,
+      IfMatch: cfg.ETag,
+      DistributionConfig: {
+        ...config,
+        DefaultCacheBehavior: { ...config.DefaultCacheBehavior, TargetOriginId: targetOriginId },
+      },
+    })
+  );
+}
+
 const steps = {
   async init(site) {
     return { siteId: site.siteId, domainOwned: !!site.domainOwned };
@@ -203,7 +289,9 @@ const steps = {
     );
     if (res.Status === "ERROR" || res.Status === "FAILED")
       throw new Error(`domain registration failed: ${res.Message}`);
-    return { siteId: site.siteId, domainReady: res.Status === "SUCCESSFUL" };
+    const domainReady = res.Status === "SUCCESSFUL";
+    if (domainReady) await recordDomainExpiration(site);
+    return { siteId: site.siteId, domainReady };
   },
 
   async ensureHostedZone(site) {
@@ -350,7 +438,7 @@ const steps = {
           Aliases: { Quantity: 2, Items: [site.domain, `www.${site.domain}`] },
           DefaultRootObject: "dist/index.html",
           Origins: {
-            Quantity: 1,
+            Quantity: 2,
             Items: [
               {
                 Id: originId,
@@ -358,6 +446,7 @@ const steps = {
                 OriginAccessControlId: oacId,
                 S3OriginConfig: { OriginAccessIdentity: "" },
               },
+              placeholderOriginConfig(),
             ],
           },
           DefaultCacheBehavior: {
@@ -500,6 +589,22 @@ const steps = {
       { ":failed": "failed", ":e": msg },
       { "#s": "status", "#err": "error" }
     );
+
+    // If the failure happened after createDistribution (checkDist/writeAlias/
+    // lockBucket), DNS is already pointed at a real distribution whose site
+    // never finished going live — swap it to the placeholder rather than
+    // leaving a visitor looking at broken or half-locked bucket content.
+    // Best-effort: don't let a CloudFront hiccup here mask the failed-status
+    // write above, and there's no one actively watching this resolve, so no
+    // propagation poll is needed.
+    if (site.distributionId) {
+      try {
+        await swapTargetOrigin(site, PLACEHOLDER_ORIGIN_ID);
+      } catch (err) {
+        console.warn(`swapTargetOrigin (markFailed) failed for site ${site.siteId}: ${err}`);
+      }
+    }
+
     return { siteId: site.siteId, status: "failed" };
   },
 
@@ -534,23 +639,33 @@ const steps = {
     };
   },
 
-  async enableDistribution(site) {
-    if (!site.distributionId) throw new Error("distributionId missing");
-    const cfg = await cloudfront.send(
-      new GetDistributionConfigCommand({ Id: site.distributionId })
-    );
-    if (cfg.DistributionConfig?.Enabled === true) return { siteId: site.siteId };
-    await cloudfront.send(
-      new UpdateDistributionCommand({
-        Id: site.distributionId,
-        IfMatch: cfg.ETag,
-        DistributionConfig: { ...cfg.DistributionConfig, Enabled: true },
-      })
-    );
+  async switchToPlaceholderOrigin(site) {
+    if (!site.distributionId) return { siteId: site.siteId, distDisabled: true };
+    await swapTargetOrigin(site, PLACEHOLDER_ORIGIN_ID);
     return { siteId: site.siteId };
   },
 
-  async checkDistEnabled(site) {
+  async checkPlaceholderOriginActive(site) {
+    if (!site.distributionId) return { siteId: site.siteId, distDisabled: true };
+    const res = await cloudfront.send(
+      new GetDistributionCommand({ Id: site.distributionId })
+    );
+    return {
+      siteId: site.siteId,
+      distDisabled:
+        res.Distribution?.Status === "Deployed" &&
+        res.Distribution?.DistributionConfig?.DefaultCacheBehavior?.TargetOriginId ===
+          PLACEHOLDER_ORIGIN_ID,
+    };
+  },
+
+  async switchToLiveOrigin(site) {
+    if (!site.distributionId) throw new Error("distributionId missing");
+    await swapTargetOrigin(site, `s3-${site.previewBucket}`);
+    return { siteId: site.siteId };
+  },
+
+  async checkLiveOriginActive(site) {
     const res = await cloudfront.send(
       new GetDistributionCommand({ Id: site.distributionId })
     );
@@ -558,7 +673,8 @@ const steps = {
       siteId: site.siteId,
       distEnabled:
         res.Distribution?.Status === "Deployed" &&
-        res.Distribution?.DistributionConfig?.Enabled === true,
+        res.Distribution?.DistributionConfig?.DefaultCacheBehavior?.TargetOriginId ===
+          `s3-${site.previewBucket}`,
     };
   },
 

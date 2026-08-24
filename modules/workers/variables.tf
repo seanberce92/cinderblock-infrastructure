@@ -19,6 +19,11 @@ variable "uploads_bucket_arn" {
   type = string
 }
 
+variable "placeholder_origin_domain" {
+  description = "Regional REST-endpoint domain of the shared public placeholder bucket, used as a second CloudFront origin on every site's distribution (swapped in while offline or after a failure that leaves DNS already pointed at Cinderblock)"
+  type        = string
+}
+
 variable "bedrock_model_id" {
   description = "Bedrock model id the site-builder invokes"
   type        = string
@@ -85,6 +90,53 @@ variable "alert_email" {
   type        = string
 }
 
+variable "domain_renewal_schedule_expression" {
+  description = "EventBridge schedule for the domain-renewal reminder/charge Lambda"
+  type        = string
+  default     = "rate(1 day)"
+}
+
+variable "domain_renewal_heads_up_days" {
+  description = "Comma-separated days-before-expiration thresholds that trigger an informational heads-up email"
+  type        = string
+  default     = "14,7"
+}
+
+variable "domain_renewal_charge_attempt_days" {
+  description = "Comma-separated days-before-expiration thresholds that trigger an off-session Stripe charge attempt"
+  type        = string
+  default     = "3"
+}
+
+variable "backend_internal_url" {
+  description = "Base URL of the backend API (e.g. https://api.cinderblock.site), used by the domain-renewal, cleanup, and subscription-teardown Lambdas to call /internal/* routes"
+  type        = string
+}
+
+# Shared secret the domain-renewal/cleanup/subscription-teardown Lambdas send
+# as X-Internal-Secret and the backend's InternalSecretGuard checks against
+# INTERNAL_API_SECRET (cinderblock-backend, set via
+# `sst secret set InternalApiSecret <value>`). Same plain-tfvars convention as
+# stripe_secret_key_readonly/google_maps_api_key.
+variable "internal_api_secret" {
+  description = "Shared secret authenticating internal-caller Lambdas to the backend's /internal/* routes"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "preview_heads_up_minutes" {
+  description = "Minutes before a preview site's 12h expiry that the cleanup Lambda sends a 'preview expiring soon' email"
+  type        = number
+  default     = 60
+}
+
+variable "warning_days_before_teardown" {
+  description = "Days before the end of the offline grace period that the subscription-teardown Lambda sends a permanent-deletion warning email"
+  type        = number
+  default     = 7
+}
+
 variable "lambda_site_builder_zip_path" {
   type    = string
   default = "../lambdas/site-builder/lambda.zip"
@@ -108,4 +160,9 @@ variable "lambda_reconciler_zip_path" {
 variable "lambda_subscription_teardown_zip_path" {
   type    = string
   default = "../lambdas/subscription-teardown/lambda.zip"
+}
+
+variable "lambda_domain_renewal_zip_path" {
+  type    = string
+  default = "../lambdas/domain-renewal/lambda.zip"
 }

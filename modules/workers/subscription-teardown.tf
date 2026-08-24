@@ -63,6 +63,9 @@ resource "aws_lambda_function" "subscription_teardown" {
       STRIPE_SECRET_KEY               = var.stripe_secret_key_readonly
       SITE_TEARDOWN_STATE_MACHINE_ARN = aws_sfn_state_machine.site_teardown.arn
       GRACE_PERIOD_DAYS               = var.grace_period_days
+      BACKEND_INTERNAL_URL            = var.backend_internal_url
+      INTERNAL_API_SECRET             = var.internal_api_secret
+      WARNING_DAYS_BEFORE_TEARDOWN    = var.warning_days_before_teardown
     }
   }
 }

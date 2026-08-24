@@ -1,0 +1,7 @@
+{
+  "name": "cinderblock-domain-renewal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Daily EventBridge sweep: finds Cinderblock-owned domains crossing a heads-up or charge-attempt threshold and calls the backend's /internal/* routes to send the branded email / attempt the Stripe charge. Uses the runtime-bundled AWS SDK v3 and native fetch — no node_modules."
+}

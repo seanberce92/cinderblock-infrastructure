@@ -1,0 +1,10 @@
+{
+  "name": "cinderblock-cognito-email-sender",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cognito Custom Email Sender trigger: decrypts the AWS-Encryption-SDK-wrapped verification code (via a KMS keyring) and sends a branded SES email in place of Cognito's default mailer. Unlike this repo's other infra Lambdas, this one has a real dependency and ships node_modules — see build-lambda.sh.",
+  "dependencies": {
+    "@aws-crypto/client-node": "^5.0.2"
+  }
+}
