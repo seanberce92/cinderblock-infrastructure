@@ -47,6 +47,18 @@ export const MODEL_FILE_PATHS = [
   "src/styles/global.css",
 ];
 
+/** Concrete visual direction per DesignStyle value (see SiteFormData.designStyle in lib/types.ts). */
+export const DESIGN_STYLE_GUIDANCE = {
+  glassmorphism:
+    "Glassmorphism — frosted-glass panels (semi-transparent backgrounds, backdrop-blur, subtle 1px light borders) layered over a colorful or gradient backdrop, soft shadows, rounded corners.",
+  neomorphism:
+    "Neomorphism (soft UI) — low-contrast monochrome surfaces with soft dual-direction drop shadows (light + dark) that make elements look extruded from or pressed into the background; minimal color, subtle depth over sharp edges.",
+  minimalism:
+    "Minimalism — generous whitespace, a restrained neutral palette accented sparingly with the brand colors, simple typography, few decorative elements, clean grid alignment.",
+  "bento-grid":
+    "Bento grid — content organized into a grid of distinct rounded rectangular cards/tiles of varying sizes (like a bento box), each holding one piece of content, with clear gutters between tiles.",
+};
+
 // Loaded once at module scope (cold-start reuse across warm invocations).
 const SYSTEM_PROMPT_TEMPLATE = readFileSync(
   new URL("./prompts/system.md", import.meta.url),
@@ -177,7 +189,8 @@ function formatReviewsBlock(reviews) {
   );
 }
 
-function formatBusinessInput({ site, inspirationContext, googleBusinessData, reviewData }) {
+/** Exported for unit testing. */
+export function formatBusinessInput({ site, inspirationContext, googleBusinessData, reviewData }) {
   const fd = site.formData || {};
   const parts = [];
   parts.push(`Business name: ${site.siteName}`);
@@ -193,6 +206,10 @@ function formatBusinessInput({ site, inspirationContext, googleBusinessData, rev
         `primary=${colors.primary || "(your choice)"}, secondary=${colors.secondary || "(your choice)"}, ` +
         `tertiary=${colors.tertiary || "(your choice)"}.`
     );
+  }
+
+  if (fd.designStyle && DESIGN_STYLE_GUIDANCE[fd.designStyle]) {
+    parts.push(`Required design style: ${DESIGN_STYLE_GUIDANCE[fd.designStyle]}`);
   }
 
   if (inspirationContext?.title || inspirationContext?.description) {

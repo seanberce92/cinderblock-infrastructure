@@ -26,7 +26,12 @@ resource "aws_s3_bucket_cors_configuration" "uploads" {
   cors_rule {
     allowed_headers = ["*"]
     allowed_methods = ["PUT", "GET"]
-    allowed_origins = [var.cors_origin]
+    # var.cors_origin is the deployed frontend (qa.cinderblock.site). This
+    # bucket is also shared by every developer's personal `sst dev` stage
+    # (see cinderblock-backend/sst.config.ts UPLOADS_BUCKET fallback), whose
+    # browser origin is always localhost:5173 — hardcoded here rather than
+    # threaded through as another variable since it never varies per env.
+    allowed_origins = [var.cors_origin, "http://localhost:5173"]
     expose_headers  = ["ETag"]
     max_age_seconds = 3000
   }

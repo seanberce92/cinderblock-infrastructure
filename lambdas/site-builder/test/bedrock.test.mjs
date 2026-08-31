@@ -5,6 +5,7 @@ import {
   enforceFavicon,
   mergeContactData,
   formatImageList,
+  formatBusinessInput,
 } from "../bedrock.mjs";
 
 test("enforceColors overrides an existing declaration", () => {
@@ -163,4 +164,25 @@ test("formatImageList: captioned image alongside a logo and an uncaptioned photo
     out,
     '- /dist/images/logo.png (logo)\n- /dist/images/photo-0.jpg — "Storefront"\n- /dist/images/photo-1.jpg'
   );
+});
+
+test("formatBusinessInput: includes a Required design style line when formData.designStyle is set", () => {
+  const out = formatBusinessInput({
+    site: { siteName: "Acme", domain: "acme.com", formData: { designStyle: "glassmorphism" } },
+  });
+  assert.match(out, /Required design style: Glassmorphism/);
+});
+
+test("formatBusinessInput: omits the design style line when formData.designStyle is unset", () => {
+  const out = formatBusinessInput({
+    site: { siteName: "Acme", domain: "acme.com", formData: {} },
+  });
+  assert.doesNotMatch(out, /Required design style/);
+});
+
+test("formatBusinessInput: ignores an unrecognized designStyle value rather than emitting 'undefined'", () => {
+  const out = formatBusinessInput({
+    site: { siteName: "Acme", domain: "acme.com", formData: { designStyle: "not-a-real-style" } },
+  });
+  assert.doesNotMatch(out, /Required design style/);
 });

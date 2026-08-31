@@ -1,25 +1,25 @@
 output "users_table_name" {
-  value = aws_dynamodb_table.users.name
+  value = module.dynamodb.users_table_name
 }
 
 output "users_table_arn" {
-  value = aws_dynamodb_table.users.arn
+  value = module.dynamodb.users_table_arn
 }
 
 output "sites_table_name" {
-  value = aws_dynamodb_table.sites.name
+  value = module.dynamodb.sites_table_name
 }
 
 output "sites_table_arn" {
-  value = aws_dynamodb_table.sites.arn
+  value = module.dynamodb.sites_table_arn
 }
 
 output "ratelimits_table_name" {
-  value = aws_dynamodb_table.ratelimits.name
+  value = module.dynamodb.ratelimits_table_name
 }
 
 output "ratelimits_table_arn" {
-  value = aws_dynamodb_table.ratelimits.arn
+  value = module.dynamodb.ratelimits_table_arn
 }
 
 output "uploads_bucket_name" {

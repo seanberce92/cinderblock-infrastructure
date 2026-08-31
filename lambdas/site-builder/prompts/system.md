@@ -23,8 +23,12 @@ beyond what's needed to import it correctly.
    - No analytics, external fonts via `<link>` to a CDN, or any other
      network call — self-contained, since this ships as a static export.
 
-2. `src/pages/index.astro` — Use mondern sytling that fits the vibe of the business, 
-for example for a bakery probably use earth tones. For tech company probably use 'techy' colors.
+2. `src/pages/index.astro` — If the business input specifies a "Required
+design style," you must design and style this page to clearly embody that
+style throughout (layout, surfaces, shadows, spacing — not just colors).
+Otherwise, use modern styling that fits the vibe of the business, for
+example for a bakery probably use earth tones. For tech company probably
+use 'techy' colors.
 
    See "Accessibility (WCAG 2.1 AA)" below for hard contrast/legibility
    requirements on every color pairing you write, and "Grounding data &

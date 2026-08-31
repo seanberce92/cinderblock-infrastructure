@@ -1,0 +1,10 @@
+# DynamoDB Local for cinderblock-backend's `npm run local`. In-memory only —
+# on every restart, re-run `./apply.sh` (or `../apply-local.sh` from the repo
+# root) to recreate the tables via Terraform. PAY_PER_REQUEST tables with no
+# data create instantly, so this is cheap and keeps schema in one place.
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "8000:8000"
